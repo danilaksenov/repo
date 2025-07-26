@@ -1,0 +1,24 @@
+start local server on mac
+
+САМОЕ ГЛАВНОЕ!!! - http-client-timeout=3600
+
+# каталог‑кэш (если ещё нет)
+mkdir -p ~/tg-bot-api-data
+
+docker run --platform linux/arm64/v8 -d \
+  --name tg-bot-api \
+  --restart unless-stopped \
+  -p 8081:8081 \
+  -v "$HOME/tg-bot-api-data:/var/lib/telegram-bot-api" \
+  -e TELEGRAM_API_ID=24515096 \
+  -e TELEGRAM_API_HASH=4fbb6fd69730193f40781373a3f29014 \
+  aiogram/telegram-bot-api:latest \
+    --local \
+    --http-port=8081 \
+    --dir=/var/lib/telegram-bot-api \
+    --http-client-timeout=3600 \
+    --verbosity=2
+
+
+
+docker run -d --name redis --restart unless-stopped -p 6379:6379 redis:7-alpine
