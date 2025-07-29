@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Form
+from fastapi import FastAPI, HTTPException, Form, Response
 from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse
 
 from pythonProject2.redis_client import r, JOB
@@ -64,7 +64,17 @@ async def file(jid: str):
     job = await r.hgetall(JOB(jid))
     if job.get("status") != "ready":
         raise HTTPException(404, "not ready")
-    return FileResponse(job["file"], filename=job["name"])
+    filepath = job["file"]      # полное path, напр. /tmp/yt_stream/abcd.mp4
+    filename = job["name"]      # имя для скачивания
+
+    # Вернём «перенаправление» на внутренний путь /protected/…
+    return Response(
+        status_code=200,
+        headers={
+            "X-Accel-Redirect": f"/protected/{jid}.mp4",
+            "Content-Disposition": f"attachment; filename={filename}"
+        }
+    )
 
 # тестовая форма: вводите URL и формат (например 137 для 1080p)
 @app.get("/", response_class=HTMLResponse)
