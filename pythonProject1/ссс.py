@@ -63,7 +63,7 @@ async def run_in_thread(func, *args):
 ssl_ctx = ssl.create_default_context()
 ssl_ctx.check_hostname = False
 ssl_ctx.verify_mode = ssl.CERT_NONE
-FILE_IO_LIMIT_MB = 5
+FILE_IO_LIMIT_MB = 1990
 
 bot = Bot(token=TOKEN, session=session, timeout=TIMEOUT)
 router = Dispatcher()
@@ -379,7 +379,7 @@ async def process_job(job: dict):
     selector = job["selector"]
     height   = job["height"]
     title = job["title"]
-    sizefile = job["mb"]
+    sizefile = job["size_bytes"] / 1_048_576
 
     with tempfile.TemporaryDirectory() as tmp:
         if sizefile <= FILE_IO_LIMIT_MB:
@@ -448,8 +448,10 @@ async def callback_download(call: CallbackQuery):
         await call.answer("Это качество недоступно.", show_alert=True)
         return
 
+    fmt_info = context["best"][height]
     selector = context["best"][height]["selector"]
     url      = context["url"]
+    size_bytes = fmt_info["size"]
 
     chat_id = call.message.chat.id
 
@@ -467,7 +469,7 @@ async def callback_download(call: CallbackQuery):
         "selector": selector,
         "height":   height,
         "title": context["title"],
-        "mb": context["mb"]
+        "size_bytes": size_bytes
     }
 
     # --- кладём в очередь (хвост) ---
