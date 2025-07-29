@@ -63,7 +63,7 @@ async def run_in_thread(func, *args):
 ssl_ctx = ssl.create_default_context()
 ssl_ctx.check_hostname = False
 ssl_ctx.verify_mode = ssl.CERT_NONE
-FILE_IO_LIMIT_MB = 1990
+FILE_IO_LIMIT_MB = 1
 
 bot = Bot(token=TOKEN, session=session, timeout=TIMEOUT)
 router = Dispatcher()
@@ -347,7 +347,7 @@ async def handle_youtube(msg: Message):
     # ── 2. MP4‑форматы параллельно —────────────────────────────────────
     best_dict, _ = await get_best_formats(url)
     if not best_dict:
-        await msg.answer("😔 Не удалось найти MP4‑версии этого ролика.")
+        await msg.answer("😔 Не удалось найти видео.")
         return
 
     # ── 3. клавиатура —────────────────────────────────────────────────
@@ -405,7 +405,7 @@ async def process_job(job: dict):
             await status.delete()
         else:
             jid = await enqueue_stream(url, selector, title)  # 👈
-            link = f"http://localhost:8000/dl/{jid}"
+            link = f"http://45.128.99.176/dl/{jid}"
             await bot.send_message(chat_id,
                 f"Файл большой, скачайте по ссылке:\n{link}",
                 disable_web_page_preview=True
