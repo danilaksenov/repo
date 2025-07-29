@@ -1,4 +1,6 @@
-from fastapi import FastAPI, HTTPException, Form, Response
+import asyncio
+
+from fastapi import FastAPI, HTTPException, Form, Response, WebSocket
 from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse
 
 from pythonProject2.redis_client import r, JOB
@@ -7,47 +9,48 @@ import yt_dlp
 
 app = FastAPI()
 
+@app.websocket("/ws/{jid}")
+async def ws_status(ws: WebSocket, jid: str):
+    await ws.accept()
+    while True:
+        data = await r.hgetall(JOB(jid))
+        await ws.send_json({"percent": data.get("percent"), "status": data.get("status")})
+        if data.get("status") == "ready":
+            break
+        await asyncio.sleep(1)
+    await ws.close()
+
 @app.get("/dl/{jid}", response_class=HTMLResponse)
 async def dl(jid: str):
-    # просто рисуем прогресс-блок и JS‑polling
     return HTMLResponse(f"""
-<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8">
-    <title>Загрузка...</title>
-  </head>
-  <body>
-    <h1>Загрузка…</h1>
-    <div>
-      <progress id="bar" value="0" max="100"></progress>
-      <span id="pct">0%</span>
-    </div>
-    <script>
-      const jid = "{jid}";
-      function poll() {{
-        fetch("/status/" + jid)
-          .then(r => r.json())
-          .then(j => {{
-            if (j.status === "downloading") {{
-              document.getElementById("bar").value = parseInt(j.percent) || 0;
-              document.getElementById("pct").textContent = j.percent;
-              setTimeout(poll, 500);
-            }} else if (j.status === "ready") {{
-              // когда готово — переходим на скачивание
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <title>Загрузка.</title>
+      </head>
+      <body>
+        <h1>Загрузка…</h1>
+        <div>
+          <progress id="bar" value="0" max="100"></progress>
+          <span id="pct">0%</span>
+        </div>
+        <script>
+          const jid = "{jid}";
+          const ws = new WebSocket("ws://" + location.host + "/ws/" + jid);
+          ws.onmessage = e => {{
+            const j = JSON.parse(e.data);
+            document.getElementById("bar").value = parseInt(j.percent) || 0;
+            document.getElementById("pct").textContent = j.percent;
+            if (j.status === "ready") {{
+              ws.close();
               window.location = "/file/" + jid;
-            }} else if (j.status === "error") {{
-              document.body.innerHTML = "❌ Ошибка: " + j.msg;
-            }} else {{
-              setTimeout(poll, 500);
             }}
-          }});
-      }}
-      poll();
-    </script>
-  </body>
-</html>
-""")
+          }};
+        </script>
+      </body>
+    </html>
+    """)
 
 @app.get("/status/{jid}")
 async def status(jid: str):
