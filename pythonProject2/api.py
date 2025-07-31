@@ -1,6 +1,7 @@
 import asyncio
 import yt_dlp
-from fastapi import FastAPI, HTTPException, Form, Response, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Form, Response, WebSocket
+from fastapi import WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from urllib.parse import quote
 

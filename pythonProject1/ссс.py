@@ -43,7 +43,7 @@ CONTEXT: Dict[Tuple[int, int], Dict] = {}
 
 REDIS_URL = "redis://localhost:6379/0"
 QUEUE_KEY = "dl:queue"
-MAX_WORKERS = 5
+MAX_WORKERS = 8
 redis_pool = redis.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
 sem = asyncio.Semaphore(MAX_WORKERS)
 
@@ -216,8 +216,24 @@ async def get_best_formats(url: str):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _best_formats, url)
 
-
 async def _download_video(url: str, selector: str, tmp_dir: Path) -> Path:
+    """Скачивает одно видео (mp4) в отдельном потоке."""
+    def _dl():
+        ydl_opts = {
+            "format": selector,
+            "outtmpl": str(tmp_dir / "%(_id)s_%(height)sp.%(ext)s"),
+            "postprocessors": [
+            {"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"},
+        ],
+}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            return Path(ydl.prepare_filename(info))
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _dl)
+
+async def _download_video_convert(url: str, selector: str, tmp_dir: Path) -> Path:
     """Скачивает одно видео (mp4) в отдельном потоке."""
     def _dl():
         ydl_opts = {
@@ -378,9 +394,10 @@ async def handle_youtube(msg: Message):
     # 4. keyboard
     for h in sorted(k for k in best_dict if k != "aud"):
         mb = round(best_dict[h]["size"] / 1_048_576, 1)
-        kb.row(
-            InlineKeyboardButton(text=f"⚡️ {h}p • {mb} MB", callback_data=f"dl|{h}")
-        )
+        if mb < FILE_IO_LIMIT_MB:
+            kb.row(
+                InlineKeyboardButton(text=f"⚡️ {h}p • {mb} MB", callback_data=f"dl|{h}")
+            )
 
     # 5. send
     await find_vid.delete()
@@ -487,7 +504,11 @@ async def process_job(job: dict):
                 if kind == "audio":
                     file_path = await _download_audio(url, selector, tmp)
                 else:
-                    file_path = await _download_video(url, selector, tmp)
+                    try:
+                        file_path = await _download_video(url, selector, tmp)
+                    except yt_dlp.utils.DownloadError:
+                        # fallback на перекодирование (медленнее, но 100 % совместимо)
+                        file_path = await _download_video_convert(url, selector, tmp)
             except Exception as e:
                 print(e)
                 await status.edit_text("Ошибка загрузки")
@@ -516,14 +537,15 @@ async def process_job(job: dict):
             await status.delete()
         else:
             # большой файл → ссылка
-            jid = await enqueue_stream(url, selector, title)
-            link = f"http://45.128.99.176/dl/{jid}"
-            await bot.send_message(
-                chat_id,
-                f"Файл большой, скачайте по ссылке:\n{link}",
-                disable_web_page_preview=True,
-            )
-            return
+            # jid = await enqueue_stream(url, selector, title)
+            # link = f"http://45.128.99.176/dl/{jid}"
+            # await bot.send_message(
+            #     chat_id,
+            #     f"Файл большой, скачайте по ссылке:\n{link}",
+            #     disable_web_page_preview=True,
+            # )
+            # return
+            pass
 
         await bot.send_message(
             chat_id, "Пришлите ссылку, чтобы скачать новое видео 🎥"
