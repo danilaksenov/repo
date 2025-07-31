@@ -1,12 +1,11 @@
 import aiohttp, ssl, json
 import asyncio
 import logging
-import os
 import re
 import tempfile
+import redis.asyncio as redis
 from pathlib import Path
 from typing import Dict, Tuple
-from aiohttp import ClientTimeout
 import subprocess, pathlib
 import random, threading
 from typing import Optional, List
@@ -15,7 +14,6 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.types import (
     InlineKeyboardButton,
-    InlineKeyboardMarkup,
     Message,
     CallbackQuery,
     FSInputFile, BufferedInputFile,
@@ -23,6 +21,7 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
+from pythonProject2.streamer import enqueue_stream
 
 TIMEOUT   = aiohttp.ClientTimeout(total=1800, sock_read=1800)   # 30 мин на upload
 UA_HEADER = {"User-Agent": "curl/7.87.0"}                       # Cloudflare friendly
@@ -43,6 +42,17 @@ YOUTUBE_URL_RE = re.compile(
 # Simple in‑memory storage: (chat_id, message_id) -> {url, best}
 CONTEXT: Dict[Tuple[int, int], Dict] = {}
 
+
+REDIS_URL   = "redis://localhost:6379/0"
+QUEUE_KEY   = "dl:queue"
+MAX_WORKERS = 5
+redis_pool  = redis.from_url(
+    REDIS_URL, encoding="utf-8", decode_responses=True
+)
+sem = asyncio.Semaphore(MAX_WORKERS)
+
+
+
 # ----------------------------------------------------------------------
 # Helpers (blocking parts run in ThreadPool via run_in_thread)
 # ----------------------------------------------------------------------
@@ -53,7 +63,7 @@ async def run_in_thread(func, *args):
 ssl_ctx = ssl.create_default_context()
 ssl_ctx.check_hostname = False
 ssl_ctx.verify_mode = ssl.CERT_NONE
-FILE_IO_LIMIT_MB = 2000
+FILE_IO_LIMIT_MB = 1
 
 bot = Bot(token=TOKEN, session=session, timeout=TIMEOUT)
 router = Dispatcher()
@@ -337,11 +347,12 @@ async def handle_youtube(msg: Message):
     # ── 2. MP4‑форматы параллельно —────────────────────────────────────
     best_dict, _ = await get_best_formats(url)
     if not best_dict:
-        await msg.answer("😔 Не удалось найти MP4‑версии этого ролика.")
+        await msg.answer("😔 Не удалось найти видео.")
         return
 
     # ── 3. клавиатура —────────────────────────────────────────────────
     kb = InlineKeyboardBuilder()
+    mb = 0
     for h in sorted(best_dict):
         mb = round(best_dict[h]["size"] / 1_048_576, 1)
         kb.row(InlineKeyboardButton(text=f"⚡️ {h}p • {mb} MB", callback_data=f"dl|{h}"))
@@ -357,10 +368,75 @@ async def handle_youtube(msg: Message):
     )
 
     # ── 5. сохраняем контекст —────────────────────────────────────────
-    CONTEXT[(sent.chat.id, sent.message_id)] = {"url": url, "best": best_dict}
+    CONTEXT[(sent.chat.id, sent.message_id)] = {"url": url, "best": best_dict, "orig_id": msg.message_id, "title": title,
+                                                "mb": mb}
+
+
+async def process_job(job: dict):
+    chat_id  = job["chat_id"]
+    reply_id = job["reply_id"]
+    url      = job["url"]
+    selector = job["selector"]
+    height   = job["height"]
+    title = job["title"]
+    sizefile = job["size_bytes"] / 1_048_576
+
+    with tempfile.TemporaryDirectory() as tmp:
+        if sizefile <= FILE_IO_LIMIT_MB:
+            status = await bot.send_message(chat_id,
+                                            f"⬇️ Скачиваю {height}p видео...", reply_to_message_id=reply_id)
+            try:
+                file_path = await _download_video(url, selector, Path(tmp))
+            except Exception as e:
+                print(e)
+                await status.edit_text(f"Ошибка загрузки")
+                return
+
+            await status.edit_text(f"⬇️ Загрузка файла в Telegram")
+            w, h = get_wh(file_path)
+            await bot.send_video(
+                chat_id,
+                FSInputFile(file_path),
+                width=w, height=h,
+                supports_streaming=True,
+                reply_to_message_id=reply_id,
+                request_timeout=7200
+            )
+            await status.delete()
+        else:
+            jid = await enqueue_stream(url, selector, title)  # 👈
+            link = f"http://45.128.99.176/dl/{jid}"
+            await bot.send_message(chat_id,
+                f"Файл большой, скачайте по ссылке:\n{link}",
+                disable_web_page_preview=True
+            )
+            return
+        await bot.send_message(chat_id, 'Пришлите новую ссылку, чтобы скачать видео 🎥'
+                               )
+
+
+async def handle_job(raw: str):
+    job = json.loads(raw)
+    chat_id = job["chat_id"]
+    try:
+        await process_job(job)      # ваша логика "скачать → отправить"
+    finally:
+        await redis_pool.delete(BUSY_KEY(chat_id))
+        sem.release()
+
+async def worker():
+    while True:
+        _, raw = await redis_pool.brpop(QUEUE_KEY, timeout=0)   # ждём job
+        await sem.acquire()                                    # ≤ 5 одновременно
+        asyncio.create_task(handle_job(raw))
+
+
+BUSY_KEY = lambda cid: f"busy:{cid}"   # busy:123456789
+BUSY_TTL = 7200
 
 @router.callback_query(F.data.startswith("dl|"))
 async def callback_download(call: CallbackQuery):
+    # --- достаём из локального CONTEXT ---
     key = (call.message.chat.id, call.message.message_id)
     context = CONTEXT.get(key)
     if not context:
@@ -372,57 +448,43 @@ async def callback_download(call: CallbackQuery):
         await call.answer("Это качество недоступно.", show_alert=True)
         return
 
+    fmt_info = context["best"][height]
     selector = context["best"][height]["selector"]
-    url = context["url"]
+    url      = context["url"]
+    size_bytes = fmt_info["size"]
 
-    # всплывающая подсказка‑toast и отдельное сообщение в чат
-    await call.answer(f"Скачиваю {height}p видео…")
+    chat_id = call.message.chat.id
 
-    # удаляем inline‑кнопки, чтобы пользователь не нажимал повторно
-    await call.message.edit_reply_markup()
+    # ── 1. пытаемся «заблокировать» пользователя ──────────────
+    locked = await redis_pool.set(BUSY_KEY(chat_id), 1, nx=True, ex=BUSY_TTL)
+    if not locked:
+        await call.answer("⏳ Подождите, загрузка...", show_alert=True)
+        return
+
+    # --- формируем задачу ---
+    job = {
+        "chat_id":  call.message.chat.id,
+        "reply_id": context["orig_id"],
+        "url":      url,
+        "selector": selector,
+        "height":   height,
+        "title": context["title"],
+        "size_bytes": size_bytes
+    }
+
+    # --- кладём в очередь (хвост) ---
+    await redis_pool.rpush(QUEUE_KEY, json.dumps(job))
+
+    # --- ответ пользователю ---
+    await call.answer("✅ Добавлено в очередь")
+    await call.message.edit_reply_markup()   # убираем кнопки
     await call.message.delete()
-
-    status_msg = await call.message.answer(f"⬇️ Скачиваю {height}p видео… Пожалуйста, подождите…")
-
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_dir = Path(tmp)
-        try:
-            file_path = await _download_video(url, selector, tmp_dir)
-        except Exception as e:
-            await status_msg.edit_text(f"Ошибка загрузки")
-            return
-        await status_msg.edit_text(f"⬇️ Загрузка файла в Telegram")
-        size_mb = file_path.stat().st_size / 1_048_576
-        if size_mb <= FILE_IO_LIMIT_MB:
-            # — 2A. Отправляем как документ (Telegram-плеер при ≤50 МБ не нужен)
-            w, h = get_wh(file_path)
-            logging.getLogger("aiogram.client").setLevel(logging.DEBUG)
-            await call.message.answer_video(
-                FSInputFile(file_path),
-                request_timeout=1800,
-                width=w,
-                height=h,
-                supports_streaming=True
-            )
-            await status_msg.delete()
-        else:
-            # — 2B. Крупный файл: выгружаем на file.io и даём ссылку
-            try:
-                link = await upload_to_gofile(file_path)
-            except Exception as e:
-                await status_msg.edit_text(f"file.io: {e}")
-                return
-            await status_msg.delete()
-            await call.message.answer(
-                f"📎 Файл превышает {FILE_IO_LIMIT_MB//1000} Gb.\n"
-                f"Скачайте его по ссылке:\n{link}"
-            )
-        await call.message.answer('Если хотите скачать еще одно видео, просто пришлите на него ссылку 💋')
-    CONTEXT.pop(key, None)
+    CONTEXT.pop(key, None)                   # локальный контекст больше не нужен
 
 
 async def main():
     logging.basicConfig(level=logging.INFO)
+    asyncio.create_task(worker())  # фон‑очередь
     await router.start_polling(bot)
 
 
