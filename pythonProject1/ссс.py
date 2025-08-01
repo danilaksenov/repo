@@ -96,33 +96,6 @@ async def _safe_json(resp: aiohttp.ClientResponse) -> Optional[dict]:
     except json.JSONDecodeError:
         return None
 
-
-async def _get_server(session: aiohttp.ClientSession) -> str:
-    """
-    Возвращает id свободного сервера (store1 …), даже если основной вызов зафейлился.
-    """
-    # 1) новый энд-поинт /servers (возвращает список всех)
-    try:
-        async with session.get("https://api.gofile.io/servers") as r:
-            js = await _safe_json(r)
-            if js and js.get("status") == "ok":
-                servers = list(js["data"]["servers"].keys())
-                return random.choice(servers)
-    except Exception:
-        pass
-
-    # 2) старый /getServer
-    try:
-        async with session.get("https://api.gofile.io/getServer") as r:
-            js = await _safe_json(r)
-            if js and js.get("status") == "ok":
-                return js["data"]["server"]
-    except Exception:
-        pass
-
-    # 3) запасной жёсткий список
-    return random.choice(FALLBACK_SERVERS)
-
 # ----------------------------------------------------------------------
 # yt-dlp helpers
 # ----------------------------------------------------------------------
@@ -217,21 +190,42 @@ async def get_best_formats(url: str):
     return await loop.run_in_executor(None, _best_formats, url)
 
 async def _download_video(url: str, selector: str, tmp_dir: Path) -> Path:
-    """Скачивает одно видео (mp4) в отдельном потоке."""
-    def _dl():
+    """
+    Скачивает DASH-видео и аудио через aria2c, затем remux-ит в MP4.
+    Возвращает Path к готовому файлу.
+    """
+    def _dl() -> Path:
         ydl_opts = {
-            "format": selector,
+            # 1. какой поток вытягивать
+            "format": selector,                      # например "137+140"
             "outtmpl": str(tmp_dir / "%(_id)s_%(height)sp.%(ext)s"),
+
+            # 2. Внешний загрузчик
+            "external_downloader": "aria2c",
+            "external_downloader_args": [
+                # 16 соединений, кусок 2 МБ
+                "-x16", "-k2M",
+                # докачка, таймауты
+                "--continue=true", "--retry-wait=3",
+            ],
+
+            # 3. Пост-процесс только REMUX (быстро!)
             "postprocessors": [
-            {"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"},
-        ],
-}
+                {"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"},
+            ],
+
+            # 4. Тихий режим
+            "quiet": True,
+            "no_warnings": True,
+        }
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            return Path(ydl.prepare_filename(info))
+            return Path(ydl.prepare_filename(info)).with_suffix(".mp4")
 
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _dl)
+
 
 async def _download_video_convert(url: str, selector: str, tmp_dir: Path) -> Path:
     """Скачивает одно видео (mp4) в отдельном потоке."""
@@ -507,8 +501,9 @@ async def process_job(job: dict):
                     try:
                         file_path = await _download_video(url, selector, tmp)
                     except yt_dlp.utils.DownloadError:
+                        return
                         # fallback на перекодирование (медленнее, но 100 % совместимо)
-                        file_path = await _download_video_convert(url, selector, tmp)
+                        # file_path = await _download_video_convert(url, selector, tmp)
             except Exception as e:
                 print(e)
                 await status.edit_text("Ошибка загрузки")
