@@ -142,25 +142,24 @@ def _get_ytdl() -> yt_dlp.YoutubeDL:
 def _best_formats(url: str):
     """Собирает лучшие видео-варианты + минимальное аудио."""
     ydl = _get_ytdl()
-    info = ydl.extract_info(url, download=False)
-
-    duration = info.get("duration", 0) or 0
     best: Dict = {}
 
     # ① минимальный m4a-поток
     audio_fmt = None
     audio_size = float("inf")
+
+    if audio_fmt:
+        best["aud"] = {"selector": audio_fmt["format_id"], "size": audio_size}
+
+    info = ydl.extract_info(url, download=False)
+    duration = info.get("duration", 0) or 0
+    # ② перебираем только MP4/H.264-видео-потоки
     for fmt in info["formats"]:
         if fmt.get("vcodec") == "none" and fmt.get("ext") == "m4a":
             size = _calc_size(fmt, duration)
             if size < audio_size:
                 audio_fmt, audio_size = fmt, size
 
-    if audio_fmt:
-        best["aud"] = {"selector": audio_fmt["format_id"], "size": audio_size}
-
-    # ② перебираем только MP4/H.264-видео-потоки
-    for fmt in info["formats"]:
         if fmt.get("ext") != "mp4":
             continue
         vcodec = fmt.get("vcodec") or ""
@@ -204,7 +203,7 @@ async def _download_video(url: str, selector: str, tmp_dir: Path) -> Path:
             "external_downloader": "aria2c",
             "external_downloader_args": [
                 # 16 соединений, кусок 2 МБ
-                "-x16", "-k2M",
+                "-x6", "-k2M",
                 # докачка, таймауты
                 "--continue=true", "--retry-wait=3",
             ],
@@ -213,6 +212,7 @@ async def _download_video(url: str, selector: str, tmp_dir: Path) -> Path:
             "postprocessors": [
                 {"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"},
             ],
+            "postprocessor_args": ["-threads", "1"],
 
             # 4. Тихий режим
             "quiet": True,
