@@ -1,5 +1,7 @@
 start local server on mac
 
+pip install aiohttp, asyncio, aiogram, yt_dlp, redis, ffmpeg
+
 САМОЕ ГЛАВНОЕ!!! - http-client-timeout=3600
 
 # каталог‑кэш (если ещё нет)

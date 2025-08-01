@@ -25,7 +25,7 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 
 # если используете стример
-from pythonProject2.streamer import enqueue_stream
+# from pythonProject2.streamer import enqueue_stream
 
 # ----------------------------------------------------------------------
 # CONFIG
